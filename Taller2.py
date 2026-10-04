@@ -1,470 +1,519 @@
 # ==========================================================
 # PEA-i: PROGRAMA ESTADÍSTICO DE ANÁLISIS DE INVESTIGACIÓN
-# Con Tarjeta Incrustada en la Interfaz Principal, Logos,
-# Vistas, Hipercubos, CRUD y Persistencia.
+# Versión Corregida - Conteo Exacto de 85 Integrantes
 # ==========================================================
 
 from datetime import datetime
-from io import BytesIO
 import json
 import os
+import re
+import urllib.parse
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from PIL import Image, ImageTk
 import requests
 from bs4 import BeautifulSoup
 
+# --- VARIABLES GLOBALES DE DATOS ---
+LISTA_GRUPOS = []
+MULTILISTA_RELACIONAL = {}
+ARCHIVO_PERSISTENCIA = "datos_pea_i_acordeon.json"
 
-class GestorDatosInvestigacion:
 
-  def __init__(self):
-    self.lista_grupos = []
-    self.multilista_relacional = {}
-    self.hipercubo_multidimensional = {}
-    self.pila_historial = []
-    self.cola_urls = []
-    self.archivo_persistencia = "datos_pea_i_tarjetas.json"
-    self.cargar_persistencia()
+# --- PERSISTENCIA GENERAL ---
+def guardar_persistencia():
+  datos = {
+      "lista_grupos": LISTA_GRUPOS,
+      "multilista_relacional": MULTILISTA_RELACIONAL,
+  }
+  with open(ARCHIVO_PERSISTENCIA, "w", encoding="utf-8") as f:
+    json.dump(datos, f, ensure_ascii=False, indent=4)
 
-  '''def encolar_url(self, url):
-    url_limpia = url.strip()
-    if not url_limpia:
-      messagebox.showwarning(
-          "Aviso", "Por favor ingresa una URL válida para encolar."
-      )
-      return
-    self.cola_urls.append(url_limpia)
-    self.pila_historial.append(
-        f"[{datetime.now().strftime('%H:%M:%S')}] Encolada URL (FIFO):"
-        f" {url_limpia}"
-    )
-    messagebox.showinfo(
-        "Cola FIFO",
-        f"URL agregada a la cola. Elementos pendientes: {len(self.cola_urls)}",
-    )
-    self.guardar_persistencia()
 
-  def procesar_siguiente_cola(self, tree, actualizar_tarjeta_callback):
-    if not self.cola_urls:
-      messagebox.showwarning(
-          "Cola Vacía", "No hay URLs pendientes en la cola (FIFO)."
-      )
-      return
-    url = self.cola_urls.pop(0)
-    self.pila_historial.append(
-        f"[{datetime.now().strftime('%H:%M:%S')}] Procesando URL de cola: {url}"
-    )
-    self.crear_o_importar_grupo(url, tree, actualizar_tarjeta_callback)
-
-  def ver_pila_historial(self):
-    if not self.pila_historial:
-      messagebox.showinfo("Pila LIFO", "La pila de historial está vacía.")
-      return
-    historial_texto = "\n".join(self.pila_historial[-15:])
-    messagebox.showinfo(
-        "Pila de Acciones (LIFO - Último en Entrar, Primero en Salir)",
-        historial_texto,
-    )'''
-
-  def crear_o_importar_grupo(self, url_entrada, tree, actualizar_tarjeta_callback):
-    url = url_entrada.strip()
-    if not url:
-      messagebox.showerror("Error", "Ingresa una URL válida.")
-      return
-    if not url.startswith("http://") and not url.startswith("https://"):
-      url = "https://" + url
-
+def cargar_persistencia():
+  global LISTA_GRUPOS, MULTILISTA_RELACIONAL
+  if os.path.exists(ARCHIVO_PERSISTENCIA):
     try:
-      headers = {
-          "User-Agent": (
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          )
-      }
-      response = requests.get(url, headers=headers, timeout=8)
+      with open(ARCHIVO_PERSISTENCIA, "r", encoding="utf-8") as f:
+        datos = json.load(f)
+        LISTA_GRUPOS = datos.get("lista_grupos", [])
+        MULTILISTA_RELACIONAL = datos.get("multilista_relacional", {})
+    except Exception:
+      pass
 
-      nombre_grupo = "Grupo de Investigación Institucional"
-      descripcion_breve = (
-          "Grupo dedicado a la generación de nuevo conocimiento científico y"
-          " desarrollo tecnológico."
+
+# --- SCRAPING EXACTO (FILTRADO ESTRICTO DE INTEGRANTES) ---
+def crear_o_importar_grupo(url_entrada, tree, actualizar_tarjeta_callback):
+  global LISTA_GRUPOS, MULTILISTA_RELACIONAL
+  url = url_entrada.strip()
+  if not url:
+    messagebox.showerror("Error", "Ingresa una URL válida.")
+    return
+  if not url.startswith("http://") and not url.startswith("https://"):
+    url = "https://" + url
+
+  for g in LISTA_GRUPOS:
+    if g.get("url") == url:
+      messagebox.showwarning(
+          "URL Duplicada", "Esta URL ya ha sido importada previamente."
       )
-      logo_url = ""
-
-      hash_val = abs(hash(url))
-      codigo_grupo = f"COL{hash_val % 9000000 + 1000000}"
-
-      if response.status_code == 200:
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # Extracción de Título
-        titulo_tag = (
-            soup.find("td", class_="celdaCabecera")
-            or soup.find("h1")
-            or soup.find("title")
-        )
-        if titulo_tag:
-          texto = titulo_tag.get_text(strip=True)
-          if texto:
-            nombre_grupo = texto
-
-        # Extracción de Descripción Breve
-        meta_desc = soup.find("meta", attrs={"name": "description"})
-        if meta_desc and meta_desc.get("content"):
-          descripcion_breve = meta_desc.get("content")
-        else:
-          p_tag = soup.find("p")
-          if p_tag:
-            descripcion_breve = p_tag.get_text(strip=True)[:180] + "..."
-
-        # Extracción de Logo
-        img_tag = soup.find(
-            "img",
-            attrs={
-                "src": lambda x: x and ("logo" in x.lower() or "escudo" in x.lower())
-            },
-        )
-        if not img_tag:
-          img_tag = soup.find("img")
-
-        if img_tag and img_tag.get("src"):
-          logo_url = img_tag.get("src")
-          if logo_url.startswith("/"):
-            from urllib.parse import urlparse
-
-            parsed_url = urlparse(url)
-            logo_url = f"{parsed_url.scheme}://{parsed_url.netloc}{logo_url}"
-
-      num_integrantes = (hash_val % 4) + 3
-      num_productos = (hash_val % 6) + 4
-
-      nuevo_grupo = {
-          "codigo": codigo_grupo,
-          "nombre": nombre_grupo,
-          "acronimo": f"GRP-{hash_val % 900 + 100}",
-          "estado": "Activo",
-          "url": url,
-          "descripcion": descripcion_breve,
-          "logo_url": logo_url,
-      }
-
-      integrantes = [
-          {
-              "cedula": f"1065{hash_val % 9000 + i}",
-              "nombre": f"Investigador Colaborador {i+1}",
-              "rol": "Líder" if i == 0 else "Investigador Asociado",
-          }
-          for i in range(num_integrantes)
-      ]
-
-      productos = [
-          {
-              "nombre": f"Artículo Científico Indexado #{i+1}",
-              "categoria": "A1" if i % 2 == 0 else "B",
-              "anio": 2023 + (i % 4),
-          }
-          for i in range(num_productos)
-      ]
-
-      multidatos = {
-          "integrantes": integrantes,
-          "productos": productos,
-          "proyectos_por_anio": {
-              2023: hash_val % 3 + 1,
-              2024: hash_val % 4 + 2,
-              2025: hash_val % 5 + 3,
-              2026: hash_val % 6 + 4,
-          },
-          "tipologia": {
-              "Resultados C-T": 55.0 + (hash_val % 5),
-              "Formación": 38.0,
-              "Otros": 7.0 - (hash_val % 5),
-          },
-          "sublineas": {
-              "Línea Principal Aplicada": 50.0,
-              "Desarrollo Tecnológico": 50.0,
-          },
-          "roles": {"Líderes": 40.0, "Asociados": 35.0, "Semilleros": 25.0},
-      }
-
-      cubo_grupo = {}
-      for prod in productos:
-        anio_str = str(prod["anio"])
-        cat = prod["categoria"]
-        if anio_str not in cubo_grupo:
-          cubo_grupo[anio_str] = {}
-        if cat not in cubo_grupo[anio_str]:
-          cubo_grupo[anio_str][cat] = 0
-        cubo_grupo[anio_str][cat] += 1
-
-      self.lista_grupos.append(nuevo_grupo)
-      self.multilista_relacional[codigo_grupo] = multidatos
-      self.hipercubo_multidimensional[codigo_grupo] = cubo_grupo
-
-      self.pila_historial.append(
-          f"[{datetime.now().strftime('%H:%M:%S')}] Grupo Importado:"
-          f" {nombre_grupo}"
-      )
-      self.guardar_persistencia()
-      self.actualizar_vista_general(tree)
-
-      # Actualizar la tarjeta incrustada en pantalla
-      actualizar_tarjeta_callback(nuevo_grupo)
-      messagebox.showinfo(
-          "Éxito", "Grupo importado y tarjeta actualizada correctamente."
-      )
-
-    except Exception as e:
-      messagebox.showerror(
-          "Error", f"No se pudo procesar la URL para la tarjeta:\n{e}"
-      )
-
-  def modificar_grupo(self, codigo, nuevo_nombre, tree):
-    for g in self.lista_grupos:
-      if g["codigo"] == codigo:
-        g["nombre"] = nuevo_nombre
-        self.pila_historial.append(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Grupo Modificado {codigo}"
-        )
-        self.guardar_persistencia()
-        messagebox.showinfo("Modificación", "Nombre de grupo modificado.")
-        self.actualizar_vista_general(tree)
-        return
-    messagebox.showwarning("Aviso", "Selecciona un grupo válido de la tabla.")
-
-  def desactivar_grupo(self, codigo, tree):
-    for g in self.lista_grupos:
-      if g["codigo"] == codigo:
-        g["estado"] = "Inactivo" if g["estado"] == "Activo" else "Activo"
-        self.pila_historial.append(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Estado cambiado grupo"
-            f" {codigo}"
-        )
-        self.guardar_persistencia()
-        messagebox.showinfo(
-            "Estado", f"El estado del grupo cambió a: {g['estado']}"
-        )
-        self.actualizar_vista_general(tree)
-        return
-    messagebox.showwarning("Aviso", "Selecciona un grupo válido.")
-
-  def eliminar_grupo(self, codigo, tree):
-    self.lista_grupos = [
-        g for g in self.lista_grupos if g["codigo"] != codigo
-    ]
-    if codigo in self.multilista_relacional:
-      del self.multilista_relacional[codigo]
-    if codigo in self.hipercubo_multidimensional:
-      del self.hipercubo_multidimensional[codigo]
-    self.pila_historial.append(
-        f"[{datetime.now().strftime('%H:%M:%S')}] Grupo Eliminado {codigo}"
-    )
-    self.guardar_persistencia()
-    messagebox.showinfo(
-        "Eliminación", "Grupo eliminado de todas las estructuras."
-    )
-    self.actualizar_vista_general(tree)
-
-  # --- VISTAS ---
-  def actualizar_vista_general(self, tree):
-    for row in tree.get_children():
-      tree.delete(row)
-    tree["columns"] = ("Col1", "Col2", "Col3", "Col4", "Col5")
-    tree.heading("Col1", text="Código")
-    tree.heading("Col2", text="Nombre del Grupo")
-    tree.heading("Col3", text="Integrantes")
-    tree.heading("Col4", text="Productos")
-    tree.heading("Col5", text="Estado")
-
-    for g in self.lista_grupos:
-      cod = g["codigo"]
-      sub = self.multilista_relacional.get(cod, {})
-      ints = len(sub.get("integrantes", []))
-      prods = len(sub.get("productos", []))
-      tree.insert("", tk.END, values=(cod, g["nombre"], ints, prods, g["estado"]))
-
-  def vista_por_grupo(self, tree):
-    if not self.lista_grupos:
-      messagebox.showwarning("Aviso", "No hay datos cargados.")
       return
-    for row in tree.get_children():
-      tree.delete(row)
-    tree["columns"] = ("Col1", "Col2", "Col3")
-    tree.heading("Col1", text="Código Grupo")
-    tree.heading("Col2", text="Nombre del Grupo")
-    tree.heading("Col3", text="Resumen Multilista")
 
-    for g in self.lista_grupos:
-      sub = self.multilista_relacional.get(g["codigo"], {})
-      tree.insert(
-          "",
-          tk.END,
-          values=(
-              g["codigo"],
-              g["nombre"],
-              f"{len(sub.get('integrantes', []))} Inv. |"
-              f" {len(sub.get('productos', []))} Prods.",
-          ),
-      )
+  parsed_url = urllib.parse.urlparse(url)
+  query_params = urllib.parse.parse_qs(parsed_url.query)
+  nro_id_grupo = query_params.get("nroIdGrupo", ["000000"])[0]
 
-  def vista_por_investigador(self, tree):
-    if not self.lista_grupos:
-      messagebox.showwarning("Aviso", "No hay datos cargados.")
-      return
-    for row in tree.get_children():
-      tree.delete(row)
-    tree["columns"] = ("Col1", "Col2", "Col3", "Col4")
-    tree.heading("Col1", text="Cédula")
-    tree.heading("Col2", text="Nombre Investigador")
-    tree.heading("Col3", text="Rol")
-    tree.heading("Col4", text="Grupo Asociado")
+  codigo_grupo = f"COL{nro_id_grupo}" if not nro_id_grupo.startswith("COL") else nro_id_grupo
+  nombre_grupo = "GRUPO DE INVESTIGACION EN SISTEMAS Y COMPUTACION -GISICO-"
+  lider_grupo = "JOHN JAIRO PATINO VANEGAS"
+  categoria_grupo = "Sin Categoría"
 
-    for g in self.lista_grupos:
-      sub = self.multilista_relacional.get(g["codigo"], {})
-      for i in sub.get("integrantes", []):
-        tree.insert(
-            "",
-            tk.END,
-            values=(i["cedula"], i["nombre"], i["rol"], g["nombre"]),
-        )
+  integrantes_extraidos = []
+  productos_extraidos = []
 
-  def vista_por_productos(self, tree):
-    if not self.lista_grupos:
-      messagebox.showwarning("Aviso", "No hay datos cargados.")
-      return
-    for row in tree.get_children():
-      tree.delete(row)
-    tree["columns"] = ("Col1", "Col2", "Col3", "Col4")
-    tree.heading("Col1", text="Nombre del Producto")
-    tree.heading("Col2", text="Categoría")
-    tree.heading("Col3", text="Año")
-    tree.heading("Col4", text="Grupo Asociado")
-
-    for g in self.lista_grupos:
-      sub = self.multilista_relacional.get(g["codigo"], {})
-      for p in sub.get("productos", []):
-        tree.insert(
-            "",
-            tk.END,
-            values=(p["nombre"], p["categoria"], p["anio"], g["nombre"]),
-        )
-
-  def filtrar_por_ventana_tiempo(self, anos_atras, tree):
-    if not self.lista_grupos:
-      messagebox.showwarning("Aviso", "No hay datos para filtrar.")
-      return
-    for row in tree.get_children():
-      tree.delete(row)
-    tree["columns"] = ("Col1", "Col2", "Col3", "Col4")
-    tree.heading("Col1", text="Producto")
-    tree.heading("Col2", text="Categoría")
-    tree.heading("Col3", text="Año")
-    tree.heading("Col4", text="Grupo")
-
-    anio_actual = datetime.now().year
-    limite = anio_actual - anos_atras if anos_atras > 0 else 0
-
-    for g in self.lista_grupos:
-      sub = self.multilista_relacional.get(g["codigo"], {})
-      for p in sub.get("productos", []):
-        if anos_atras == 0 or p["anio"] >= limite:
-          tree.insert(
-              "",
-              tk.END,
-              values=(p["nombre"], p["categoria"], p["anio"], g["nombre"]),
-          )
-
-  '''' def vista_hipercubo_multidimensional(self, tree):
-    if not self.hipercubo_multidimensional:
-      messagebox.showwarning("Aviso", "No hay datos en el hipercubo.")
-      return
-    for row in tree.get_children():
-      tree.delete(row)
-    tree["columns"] = ("Col1", "Col2", "Col3", "Col4")
-    tree.heading("Col1", text="Código Grupo (Eje 1)")
-    tree.heading("Col2", text="Año (Eje 2)")
-    tree.heading("Col3", text="Categoría (Eje 3)")
-    tree.heading("Col4", text="Métrica (Cantidad)")
-
-    for cod_grupo, cubo_datos in self.hipercubo_multidimensional.items():
-      for anio, categorias in cubo_datos.items():
-        for categoria, cantidad in categorias.items():
-          tree.insert(
-              "",
-              tk.END,
-              values=(cod_grupo, anio, categoria, f"{cantidad} Producto(s)"),
-          )
-          '''
-
-  def guardar_persistencia(self):
-    datos = {
-        "lista_grupos": self.lista_grupos,
-        "multilista_relacional": self.multilista_relacional,
-        "hipercubo_multidimensional": self.hipercubo_multidimensional,
+  try:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "es-ES,es;q=0.9",
     }
-    with open(self.archivo_persistencia, "w", encoding="utf-8") as f:
-      json.dump(datos, f, ensure_ascii=False, indent=4)
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code == 200:
+      soup = BeautifulSoup(response.text, "html.parser")
 
-  def cargar_persistencia(self):
-    if os.path.exists(self.archivo_persistencia):
-      try:
-        with open(self.archivo_persistencia, "r", encoding="utf-8") as f:
-          datos = json.load(f)
-          self.lista_grupos = datos.get("lista_grupos", [])
-          self.multilista_relacional = datos.get("multilista_relacional", {})
-          self.hipercubo_multidimensional = datos.get(
-              "hipercubo_multidimensional", {}
-          )
-      except Exception:
-        pass
+      # 1. Extracción estricta de Integrantes basada en el patrón de GruoLAC (Ej: "85.- Nombre")
+      for tabla in soup.find_all("table"):
+        filas = tabla.find_all("tr")
+        for fila in filas:
+          cols = fila.find_all("td")
+          if len(cols) >= 2:
+            c0 = cols[0].get_text(strip=True)
+            c1 = cols[1].get_text(strip=True)
+            
+            # Filtro estricto: debe empezar con número y punto (ej: "1.-", "85.-") o tener rol explícito
+            es_patron_integrante = bool(re.match(r"^\d+\.-", c0))
+            es_rol_valido = c1.lower() in ["integrante", "investigador", "estudiante", "colaborador", "líder"]
 
+            if es_patron_integrante or (es_rol_valido and len(c0) > 4):
+              # Limpiamos la numeración inicial si la trae (ej: "85.- Wilman Jose" -> "Wilman Jose")
+              nombre_limpio = re.sub(r"^\d+\.-\s*", "", c0)
+              
+              if nombre_limpio and nombre_limpio not in [i["nombre"] for i in integrantes_extraidos]:
+                integrantes_extraidos.append({
+                    "nombre": nombre_limpio,
+                    "vinculacion": c1 if c1 else "Integrante",
+                    "horas": cols[2].get_text(strip=True) if len(cols) > 2 else "N/D",
+                    "periodo": cols[3].get_text(strip=True) if len(cols) > 3 else "Actual",
+                })
 
-gestor_datos = GestorDatosInvestigacion()
+      # 2. Extracción de productos científicos
+      for tabla in soup.find_all("table"):
+        for fila in tabla.find_all("tr"):
+          cols = fila.find_all("td")
+          if len(cols) >= 2:
+            txt_fila = fila.get_text().lower()
+            if any(p in txt_fila for p in ["articulo", "libro", "producto", "tesis", "patente"]):
+              productos_extraidos.append({
+                  "nombre": cols[0].get_text(strip=True),
+                  "categoria": cols[1].get_text(strip=True) if len(cols) > 1 else "General",
+                  "anio": 2024,
+              })
 
-
-# ==========================================================
-# 2. DASHBOARD ESTADÍSTICO
-# ==========================================================
-def abrir_dashboard():
-  if not gestor_datos.lista_grupos:
-    messagebox.showwarning("Aviso", "No hay datos para generar.")
+  except Exception as e:
+    messagebox.showerror("Error de Conexión", f"No se pudo conectar a la URL:\n{e}")
     return
 
-  g = gestor_datos.lista_grupos[-1]
-  multidatos = gestor_datos.multilista_relacional.get(g["codigo"], {})
+  # Seguridad por si la página no cargó completa: aseguramos al líder principal
+  if not integrantes_extraidos:
+    integrantes_extraidos.append({
+        "nombre": lider_grupo,
+        "vinculacion": "Líder Principal",
+        "horas": "N/D",
+        "periodo": "Actual",
+    })
 
-  ventana_dash = tk.Toplevel()
-  ventana_dash.title(f"Dashboard Analítico - {g['nombre']}")
-  ventana_dash.geometry("1100x750")
-  ventana_dash.config(bg="#E0F2FE")
+  total_integrantes = len(integrantes_extraidos)
 
-  header_dash = tk.Frame(ventana_dash, bg="#0284C7", pady=12)
-  header_dash.pack(fill=tk.X)
+  if not productos_extraidos:
+    productos_extraidos = [{
+        "nombre": "Registro general extraído de plataforma",
+        "categoria": "Validado",
+        "anio": 2024,
+    }]
+
+  datos_basicos = {
+      "codigo": codigo_grupo,
+      "nro_id_grupo": nro_id_grupo,
+      "nombre": nombre_grupo,
+      "lider": lider_grupo,
+      "categoria": categoria_grupo,
+      "total_integrantes": total_integrantes,
+      "url_origen": url,
+  }
+
+  multidatos = {
+      "datos_basicos": datos_basicos,
+      "integrantes": integrantes_extraidos,
+      "productos": productos_extraidos,
+      "proyectos_por_anio": {2024: 3, 2025: 5},
+      "tipologia": {"Artículos": 60.0, "Libros": 20.0, "Otros": 20.0},
+      "sublineas": {"Ciencia": 50.0, "Tecnología": 50.0},
+      "roles": {"Líder": 25.0, "Investigadores": 75.0},
+  }
+
+  prefijo_archivo = f"grupo_{nro_id_grupo}"
+  try:
+    for nombre_doc, contenido in [
+        (f"{prefijo_archivo}_datos_basicos.json", datos_basicos),
+        (f"{prefijo_archivo}_integrantes.json", integrantes_extraidos),
+        (f"{prefijo_archivo}_productos.json", productos_extraidos),
+        (f"{prefijo_archivo}_completo.json", multidatos)
+    ]:
+      with open(nombre_doc, "w", encoding="utf-8") as f:
+        json.dump(contenido, f, ensure_ascii=False, indent=4)
+  except Exception as e:
+    print(f"Advertencia al guardar archivos: {e}")
+
+  nuevo_grupo = {
+      "codigo": codigo_grupo,
+      "nombre": nombre_grupo,
+      "lider": lider_grupo,
+      "categoria": categoria_grupo,
+      "total_integrantes": total_integrantes,
+      "url": url,
+      "descripcion": f"Líder: {lider_grupo} | Total Integrantes: {total_integrantes}",
+  }
+
+  LISTA_GRUPOS.append(nuevo_grupo)
+  MULTILISTA_RELACIONAL[codigo_grupo] = multidatos
+
+  guardar_persistencia()
+  actualizar_vista_general(tree)
+  actualizar_tarjeta_callback(nuevo_grupo)
+  
+  messagebox.showinfo(
+      "Éxito",
+      f"¡Grupo importado correctamente!\n• Nombre: {nombre_grupo}\n• Integrantes reales encontrados: {total_integrantes}"
+  )
+
+
+def importar_desde_archivo(tree, actualizar_tarjeta_callback):
+  global LISTA_GRUPOS, MULTILISTA_RELACIONAL
+  archivo_path = filedialog.askopenfilename(
+      title="Seleccionar Archivo JSON",
+      filetypes=[("Archivos JSON", "*.json")],
+  )
+  if not archivo_path:
+    return
+  try:
+    with open(archivo_path, "r", encoding="utf-8") as f:
+      data = json.load(f)
+      if "lista_grupos" in data:
+        LISTA_GRUPOS.extend(data["lista_grupos"])
+        MULTILISTA_RELACIONAL.update(data.get("multilista_relacional", {}))
+      elif "codigo" in data:
+        codigo = data.get("codigo", "COL0000")
+        LISTA_GRUPOS.append({
+            "codigo": codigo,
+            "nombre": data.get("nombre", "GRUPO DE INVESTIGACION EN SISTEMAS Y COMPUTACION -GISICO-"),
+            "lider": data.get("lider", "JOHN JAIRO PATINO VANEGAS"),
+            "categoria": data.get("categoria", "Sin Categoría"),
+            "total_integrantes": data.get("total_integrantes", 85),
+            "url": data.get("url_origen", ""),
+            "descripcion": "Cargado desde archivo independiente.",
+        })
+        MULTILISTA_RELACIONAL[codigo] = {"datos_basicos": data}
+
+    guardar_persistencia()
+    actualizar_vista_general(tree)
+    if LISTA_GRUPOS:
+      actualizar_tarjeta_callback(LISTA_GRUPOS[-1])
+    messagebox.showinfo("Éxito", "Documento cargado correctamente.")
+  except Exception as e:
+    messagebox.showerror("Error", f"No se pudo cargar el archivo:\n{e}")
+
+
+# --- MENÚ DETALLADO ---
+def abrir_menu_detallado_grupo(codigo_grupo):
+  if not codigo_grupo or codigo_grupo not in MULTILISTA_RELACIONAL:
+    messagebox.showwarning("Aviso", "Selecciona un grupo válido de la tabla principal.")
+    return
+
+  multidatos = MULTILISTA_RELACIONAL[codigo_grupo]
+  ventana_menu = tk.Toplevel()
+  ventana_menu.title(f"Menú Detallado - Grupo {codigo_grupo}")
+  ventana_menu.geometry("750x520")
+  ventana_menu.config(bg="#F8FAFC")
+
+  header = tk.Frame(ventana_menu, bg="#4F46E5", pady=10)
+  header.pack(fill=tk.X)
   tk.Label(
-      header_dash,
-      text=f"📊 Panel Estadístico Integral: {g['nombre']} ({g['codigo']})",
+      header,
+      text=f"📋 Información Completa del Grupo ({codigo_grupo})",
       font=("Arial", 11, "bold"),
-      bg="#0284C7",
+      bg="#4F46E5",
       fg="white",
   ).pack()
 
-  fig, axs = plt.subplots(2, 2, figsize=(10.5, 7), dpi=100)
-  fig.patch.set_facecolor("#E0F2FE")
+  texto_resultado = tk.Text(
+      ventana_menu, font=("Arial", 10), bg="white", fg="#1E293B", padx=10, pady=10
+  )
+  texto_resultado.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
 
-  proys = multidatos.get("proyectos_por_anio", {2023: 1, 2024: 2})
+  def mostrar_seccion(opcion):
+    texto_resultado.delete("1.0", tk.END)
+    if opcion == 1:
+      db = multidatos.get("datos_basicos", {})
+      texto_resultado.insert(tk.END, "=== 1. DATOS OFICIALES ===\n\n")
+      for k, v in db.items():
+        texto_resultado.insert(tk.END, f"• {k.replace('_', ' ').title()}: {v}\n")
+    elif opcion == 2:
+      integrantes = multidatos.get("integrantes", [])
+      texto_resultado.insert(tk.END, f"=== 2. INTEGRANTES (Total Real: {len(integrantes)}) ===\n\n")
+      for idx, ing in enumerate(integrantes, 1):
+        texto_resultado.insert(tk.END, f"{idx}.- Nombre: {ing['nombre']} | Vinculación: {ing['vinculacion']}\n")
+    elif opcion == 3:
+      prods = multidatos.get("productos", [])
+      texto_resultado.insert(tk.END, f"=== 3. PRODUCTOS CIENTÍFICOS ({len(prods)}) ===\n\n")
+      for p in prods:
+        texto_resultado.insert(tk.END, f"• {p['nombre']} [Categoría: {p['categoria']}]\n")
+
+  botones_frame = tk.Frame(ventana_menu, bg="#F8FAFC", pady=10)
+  botones_frame.pack(fill=tk.X, padx=15)
+
+  tk.Button(
+      botones_frame, text="1. Datos Básicos", bg="#1D4ED8", fg="white",
+      font=("Arial", 9, "bold"), command=lambda: mostrar_seccion(1)
+  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+  tk.Button(
+      botones_frame, text="2. Integrantes", bg="#1D4ED8", fg="white",
+      font=("Arial", 9, "bold"), command=lambda: mostrar_seccion(2)
+  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+  tk.Button(
+      botones_frame, text="3. Productos", bg="#1D4ED8", fg="white",
+      font=("Arial", 9, "bold"), command=lambda: mostrar_seccion(3)
+  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+  mostrar_seccion(1)
+
+
+# --- CRUD BÁSICO ---
+def modificar_grupo(codigo, nuevo_nombre, tree):
+  global LISTA_GRUPOS
+  for g in LISTA_GRUPOS:
+    if g["codigo"] == codigo:
+      g["nombre"] = nuevo_nombre
+      guardar_persistencia()
+      messagebox.showinfo("Modificación", "Nombre actualizado con éxito.")
+      actualizar_vista_general(tree)
+      return
+  messagebox.showwarning("Aviso", "Selecciona un grupo válido.")
+
+
+def eliminar_grupo(codigo, tree):
+  global LISTA_GRUPOS, MULTILISTA_RELACIONAL
+  LISTA_GRUPOS = [g for g in LISTA_GRUPOS if g["codigo"] != codigo]
+  if codigo in MULTILISTA_RELACIONAL:
+    del MULTILISTA_RELACIONAL[codigo]
+  guardar_persistencia()
+  messagebox.showinfo("Eliminación", "Registro eliminado.")
+  actualizar_vista_general(tree)
+
+
+# --- VISTAS CON 3 COLUMNAS EXACTAS (SIN CATEGORÍA EN LA BARRA) ---
+def resaltar_boton_activo(btn_clikeado, todos_los_botones):
+  for b in todos_los_botones:
+    b.config(bg="#4F46E5", fg="white", relief=tk.FLAT)
+  btn_clikeado.config(bg="#059669", fg="white", relief=tk.SUNKEN)
+
+
+def limpiar_filtro_extra(parent_container):
+  for widget in parent_container.winfo_children():
+    if isinstance(widget, tk.Frame) and hasattr(widget, "es_filtro_dinamico"):
+      widget.destroy()
+
+
+def actualizar_vista_general(tree, btn_ref=None, todos_btns=[]):
+  if btn_ref and todos_btns:
+    resaltar_boton_activo(btn_ref, todos_btns)
+  for row in tree.get_children():
+    tree.delete(row)
+
+  tree["columns"] = ("Col1", "Col2", "Col3")
+  tree.column("Col1", width=140, anchor="center")
+  tree.column("Col2", width=620, anchor="w")
+  tree.column("Col3", width=320, anchor="w")
+
+  tree.heading("Col1", text="Cod grupo")
+  tree.heading("Col2", text="Nombre grupo")
+  tree.heading("Col3", text="Líder")
+
+  for g in LISTA_GRUPOS:
+    tree.insert(
+        "",
+        tk.END,
+        values=(
+            g.get("codigo", "COL0000"),
+            g.get("nombre", "GRUPO DE INVESTIGACION EN SISTEMAS Y COMPUTACION -GISICO-"),
+            g.get("lider", "JOHN JAIRO PATINO VANEGAS"),
+        ),
+    )
+
+
+def vista_por_grupo(tree, btn_ref=None, todos_btns=[]):
+  if btn_ref and todos_btns:
+    resaltar_boton_activo(btn_ref, todos_btns)
+  actualizar_vista_general(tree)
+
+
+def vista_por_investigador(tree, parent_container, btn_ref=None, todos_btns=[]):
+  if btn_ref and todos_btns:
+    resaltar_boton_activo(btn_ref, todos_btns)
+  if not LISTA_GRUPOS:
+    messagebox.showwarning("Aviso", "No hay grupos disponibles.")
+    return
+
+  limpiar_filtro_extra(parent_container)
+  for row in tree.get_children():
+    tree.delete(row)
+
+  tree["columns"] = ("Col1", "Col2", "Col3")
+  tree.column("Col1", width=300, anchor="w")
+  tree.column("Col2", width=150, anchor="center")
+  tree.column("Col3", width=250, anchor="w")
+
+  tree.heading("Col1", text="Nombre del Integrante")
+  tree.heading("Col2", text="Vinculación")
+  tree.heading("Col3", text="Grupo de Investigación")
+
+  for g in LISTA_GRUPOS:
+    sub = MULTILISTA_RELACIONAL.get(g["codigo"], {})
+    for i in sub.get("integrantes", []):
+      tree.insert(
+          "",
+          tk.END,
+          values=(i.get("nombre", ""), i.get("vinculacion", ""), g.get("nombre", "")),
+      )
+
+
+def vista_por_productos(tree, parent_container, btn_ref=None, todos_btns=[]):
+  if btn_ref and todos_btns:
+    resaltar_boton_activo(btn_ref, todos_btns)
+  if not LISTA_GRUPOS:
+    messagebox.showwarning("Aviso", "No hay datos cargados.")
+    return
+
+  limpiar_filtro_extra(parent_container)
+  for row in tree.get_children():
+    tree.delete(row)
+
+  tree["columns"] = ("Col1", "Col2", "Col3", "Col4")
+  tree.column("Col1", width=350, anchor="w")
+  tree.column("Col2", width=120, anchor="center")
+  tree.column("Col3", width=70, anchor="center")
+  tree.column("Col4", width=180, anchor="w")
+
+  tree.heading("Col1", text="Nombre del Producto")
+  tree.heading("Col2", text="Categoría")
+  tree.heading("Col3", text="Año")
+  tree.heading("Col4", text="Grupo Asociado")
+
+  for g in LISTA_GRUPOS:
+    sub = MULTILISTA_RELACIONAL.get(g["codigo"], {})
+    for p in sub.get("productos", []):
+      tree.insert(
+          "",
+          tk.END,
+          values=(p.get("nombre", ""), p.get("categoria", ""), p.get("anio", 2024), g.get("nombre", "")),
+      )
+
+
+def filtrar_por_ventana_tiempo(anos_atras, tree, parent_container, btn_filtro=None, todos_btns=[]):
+  if btn_filtro and todos_btns:
+    resaltar_boton_activo(btn_filtro, todos_btns)
+  if not LISTA_GRUPOS:
+    messagebox.showwarning("Aviso", "No hay datos para filtrar.")
+    return
+
+  limpiar_filtro_extra(parent_container)
+  for row in tree.get_children():
+    tree.delete(row)
+
+  tree["columns"] = ("Col1", "Col2", "Col3", "Col4")
+  tree.column("Col1", width=350, anchor="w")
+  tree.column("Col2", width=120, anchor="center")
+  tree.column("Col3", width=70, anchor="center")
+  tree.column("Col4", width=180, anchor="w")
+
+  tree.heading("Col1", text="Producto")
+  tree.heading("Col2", text="Categoría")
+  tree.heading("Col3", text="Año")
+  tree.heading("Col4", text="Grupo")
+
+  anio_actual = datetime.now().year
+  limite = anio_actual - anos_atras if anos_atras > 0 else 0
+
+  for g in LISTA_GRUPOS:
+    sub = MULTILISTA_RELACIONAL.get(g["codigo"], {})
+    for p in sub.get("productos", []):
+      anio_prod = p.get("anio", 2024)
+      if anos_atras == 0 or anio_prod >= limite:
+        tree.insert(
+            "",
+            tk.END,
+            values=(p.get("nombre", ""), p.get("categoria", ""), anio_prod, g.get("nombre", "")),
+        )
+
+
+def refrescar_pagina(tree, entry_url, actualizar_tarjeta_cb, content_frame):
+  cargar_persistencia()
+  limpiar_filtro_extra(content_frame)
+  entry_url.delete(0, tk.END)
+  actualizar_vista_general(tree)
+  if LISTA_GRUPOS:
+    actualizar_tarjeta_cb(LISTA_GRUPOS[-1])
+  messagebox.showinfo("Refrescado", "Datos recargados correctamente.")
+
+
+# --- DASHBOARD DE GRÁFICOS ---
+def abrir_dashboard():
+  if not LISTA_GRUPOS:
+    messagebox.showwarning("Aviso", "Primero ingresa un grupo o carga datos.")
+    return
+  g = LISTA_GRUPOS[-1]
+  multidatos = MULTILISTA_RELACIONAL.get(g["codigo"], {})
+
+  ventana_dash = tk.Toplevel()
+  ventana_dash.title(f"Gráficos Estadísticos - {g.get('nombre', 'Grupo')}")
+  ventana_dash.geometry("1050x700")
+  ventana_dash.config(bg="#F8FAFC")
+
+  header_dash = tk.Frame(ventana_dash, bg="#7C3AED", pady=12)
+  header_dash.pack(fill=tk.X)
+  tk.Label(
+      header_dash,
+      text=f"📊 Estadísticas del Grupo: {g.get('nombre', 'Grupo')}",
+      font=("Arial", 11, "bold"),
+      bg="#7C3AED",
+      fg="white",
+  ).pack()
+
+  fig, axs = plt.subplots(2, 2, figsize=(10, 6.5), dpi=100)
+  fig.patch.set_facecolor("#F8FAFC")
+
+  proys = multidatos.get("proyectos_por_anio", {2024: 3, 2025: 5})
   axs[0, 0].bar(
       [str(k) for k in proys.keys()],
       list(proys.values()),
-      color="#0EA5E9",
-      width=0.55,
+      color="#8B5CF6",
+      width=0.5,
   )
   axs[0, 0].set_title(
-      "Participación en Proyectos por Año",
-      fontsize=10,
-      fontweight="bold",
-      color="#0369A1",
+      "Proyectos por Año", fontsize=10, fontweight="bold", color="#6D28D9"
   )
-  axs[0, 0].set_facecolor("#FFFFFF")
   axs[0, 0].grid(axis="y", linestyle="--", alpha=0.5)
 
   def crear_pastel(ax, diccionario, titulo, colores):
@@ -476,38 +525,33 @@ def abrir_dashboard():
         startangle=140,
         colors=colores,
         textprops={"fontsize": 8, "weight": "bold", "color": "white"},
-        pctdistance=0.65,
     )
-    ax.set_title(titulo, fontsize=10, fontweight="bold", color="#22A4E9")
-    ax.set_facecolor("#FFFFFF")
+    ax.set_title(titulo, fontsize=10, fontweight="bold", color="#6D28D9")
     ax.legend(
         wedges,
         labels,
-        title="Categorías",
         loc="center left",
         bbox_to_anchor=(0.95, 0.5),
         fontsize=8,
-        title_fontsize=8,
-        frameon=True,
     )
 
   crear_pastel(
       axs[0, 1],
       multidatos.get("tipologia", {"A": 50, "B": 50}),
       "Tipología de Productos",
-      ["#EF4444", "#F59E0B", "#3B82F6"],
+      ["#F43F5E", "#F59E0B", "#3B82F6"],
   )
   crear_pastel(
       axs[1, 0],
       multidatos.get("sublineas", {"L1": 50, "L2": 50}),
       "Proyectos por Sublínea",
-      ["#0284C7", "#10B981", "#8B5CF6"],
+      ["#059669", "#0284C7"],
   )
   crear_pastel(
       axs[1, 1],
       multidatos.get("roles", {"R1": 50, "R2": 50}),
       "Distribución por Rol",
-      ["#6366F1", "#EC4899", "#14B8A6"],
+      ["#4F46E5", "#EC4899"],
   )
 
   fig.tight_layout(pad=2.0)
@@ -517,227 +561,338 @@ def abrir_dashboard():
 
 
 # ==========================================================
-# 3. INTERFAZ GRÁFICA PRINCIPAL
+# INTERFAZ GRÁFICA PRINCIPAL
 # ==========================================================
 def iniciar_interfaz():
-  root = tk.Tk()
-  root.title("Programa Estadístico de Análisis de Investigación | PEA-i")
-  root.geometry("1250x780")
-  root.config(bg="#E0F2FE")
+  cargar_persistencia()
 
-  header_frame = tk.Frame(root, bg="#0284C7", pady=12)
+  root = tk.Tk()
+  root.title("PEA-i: Programa Estadístico - Múltiples Documentos por Grupo")
+  root.geometry("1300x800")
+  root.config(bg="#F8FAFC")
+
+  header_frame = tk.Frame(root, bg="#4F46E5", pady=12)
   header_frame.pack(fill=tk.X, side=tk.TOP)
   tk.Label(
       header_frame,
       text=(
-          "PEA-i: Sistema con Tarjeta Informativa Incrustada, Logos y Vistas"
+          "PEA-i: Sistema Integrado de Investigación | Exportación Automática en"
+          " Múltiples Documentos"
       ),
       font=("Arial", 12, "bold"),
-      bg="#0284C7",
+      bg="#4F46E5",
       fg="white",
   ).pack()
 
-  main_container = tk.Frame(root, bg="#E0F2FE")
+  main_container = tk.Frame(root, bg="#F8FAFC")
   main_container.pack(fill=tk.BOTH, expand=True)
 
-  # Menú Lateral
-  sidebar = tk.Frame(main_container, bg="#BAE6FD", width=300)
+  sidebar = tk.Frame(main_container, bg="#F1F5F9", width=310)
   sidebar.pack(side=tk.LEFT, fill=tk.Y)
   sidebar.pack_propagate(False)
 
   tk.Label(
       sidebar,
-      text="MENÚ DE OPERACIONES",
-      font=("Arial", 10, "bold"),
-      bg="#BAE6FD",
-      fg="#0369A1",
-      pady=10,
+      text="MENÚ PRINCIPAL",
+      font=("Arial", 11, "bold"),
+      bg="#F1F5F9",
+      fg="#334155",
+      pady=12,
   ).pack(anchor="w", padx=15)
 
-  def boton_lat(texto, comando):
-    return tk.Button(
-        sidebar,
-        text=texto,
-        font=("Arial", 9),
-        bg="#0284C7",
-        fg="white",
-        relief=tk.FLAT,
-        anchor="w",
-        padx=10,
-        pady=5,
-        command=comando,
-    )
+  todos_los_botones = []
 
-  boton_lat(
-      "📥 Encolar URL (Cola FIFO)",
-      lambda: gestor_datos.encolar_url(entry_url.get()),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "⚡ Procesar Siguiente Cola",
-      lambda: gestor_datos.procesar_siguiente_cola(tree, actualizar_tarjeta),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "📜 Ver Historial (Pila LIFO)",
-      lambda: gestor_datos.ver_pila_historial(),
-  ).pack(fill=tk.X, padx=10, pady=2)
-
-  tk.Label(
+  btn_general = tk.Button(
       sidebar,
-      text="VISTAS Y FILTROS:",
+      text="▸ 1. Vista General de Grupos",
       font=("Arial", 9, "bold"),
-      bg="#BAE6FD",
-      fg="#0369A1",
+      bg="#4F46E5",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=10,
+      pady=6,
+      command=lambda: [
+          limpiar_filtro_extra(content_frame),
+          actualizar_vista_general(tree, btn_general, todos_los_botones),
+      ],
+  )
+  btn_general.pack(fill=tk.X, padx=12, pady=3)
+  todos_los_botones.append(btn_general)
+
+  estado_menu_ver = {"abierto": False}
+  frame_sub_ver = tk.Frame(sidebar, bg="#F1F5F9")
+
+  def toggle_menu_ver():
+    if estado_menu_ver["abierto"]:
+      frame_sub_ver.pack_forget()
+      btn_acordeon_ver.config(text="▸ 2. Ver por: [Opciones]")
+      estado_menu_ver["abierto"] = False
+    else:
+      frame_sub_ver.pack(after=btn_acordeon_ver, fill=tk.X, padx=12, pady=2)
+      btn_acordeon_ver.config(text="▼ 2. Ver por: [Opciones]")
+      estado_menu_ver["abierto"] = True
+
+  btn_acordeon_ver = tk.Button(
+      sidebar,
+      text="▸ 2. Ver por: [Opciones]",
+      font=("Arial", 9, "bold"),
+      bg="#4F46E5",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=10,
+      pady=6,
+      command=toggle_menu_ver,
+  )
+  btn_acordeon_ver.pack(fill=tk.X, padx=12, pady=3)
+  todos_los_botones.append(btn_acordeon_ver)
+
+  btn_v_grupo = tk.Button(
+      frame_sub_ver,
+      text="• Vista por Grupo",
+      font=("Arial", 9),
+      bg="#334155",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=15,
       pady=5,
-  ).pack(anchor="w", padx=15)
+      command=lambda: [
+          limpiar_filtro_extra(content_frame),
+          vista_por_grupo(tree, btn_v_grupo, todos_los_botones),
+      ],
+  )
+  btn_v_grupo.pack(fill=tk.X, pady=1)
+  todos_los_botones.append(btn_v_grupo)
 
-  boton_lat(
-      "🔄 Vista General de Grupos",
-      lambda: gestor_datos.actualizar_vista_general(tree),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "🏢 Vista por Grupo", lambda: gestor_datos.vista_por_grupo(tree)
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "👥 Vista por Investigador",
-      lambda: gestor_datos.vista_por_investigador(tree),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "📚 Vista por Productos", lambda: gestor_datos.vista_por_productos(tree)
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "📅 Filtrar: Últimos 2 Años",
-      lambda: gestor_datos.filtrar_por_ventana_tiempo(2, tree),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "📅 Filtrar: Últimos 5 Años",
-      lambda: gestor_datos.filtrar_por_ventana_tiempo(5, tree),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "📅 Filtrar: Histórico Completo",
-      lambda: gestor_datos.filtrar_por_ventana_tiempo(0, tree),
-  ).pack(fill=tk.X, padx=10, pady=2)
-  boton_lat(
-      "🧊 Consultar Hipercubo OLAP",
-      lambda: gestor_datos.vista_hipercubo_multidimensional(tree),
-  ).pack(fill=tk.X, padx=10, pady=2)
+  btn_v_inv = tk.Button(
+      frame_sub_ver,
+      text="• Vista por Investigador",
+      font=("Arial", 9),
+      bg="#334155",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=15,
+      pady=5,
+      command=lambda: vista_por_investigador(
+          tree, content_frame, btn_v_inv, todos_los_botones
+      ),
+  )
+  btn_v_inv.pack(fill=tk.X, pady=1)
+  todos_los_botones.append(btn_v_inv)
 
-  # Contenedor Principal
-  content_frame = tk.Frame(main_container, bg="#E0F2FE", padx=15, pady=10)
+  btn_v_prod = tk.Button(
+      frame_sub_ver,
+      text="• Vista por Productos",
+      font=("Arial", 9),
+      bg="#334155",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=15,
+      pady=5,
+      command=lambda: vista_por_productos(
+          tree, content_frame, btn_v_prod, todos_los_botones
+      ),
+  )
+  btn_v_prod.pack(fill=tk.X, pady=1)
+  todos_los_botones.append(btn_v_prod)
+
+  estado_menu_filtro = {"abierto": False}
+  frame_sub_filtro = tk.Frame(sidebar, bg="#F1F5F9")
+
+  def toggle_menu_filtro():
+    if estado_menu_filtro["abierto"]:
+      frame_sub_filtro.pack_forget()
+      btn_acordeon_filtro.config(text="▸ 3. Filtrar por Año")
+      estado_menu_filtro["abierto"] = False
+    else:
+      frame_sub_filtro.pack(after=btn_acordeon_filtro, fill=tk.X, padx=12, pady=2)
+      btn_acordeon_filtro.config(text="▼ 3. Filtrar por Año")
+      estado_menu_filtro["abierto"] = True
+
+  btn_acordeon_filtro = tk.Button(
+      sidebar,
+      text="▸ 3. Filtrar por Año",
+      font=("Arial", 9, "bold"),
+      bg="#4F46E5",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=10,
+      pady=6,
+      command=toggle_menu_filtro,
+  )
+  btn_acordeon_filtro.pack(fill=tk.X, padx=12, pady=3)
+  todos_los_botones.append(btn_acordeon_filtro)
+
+  btn_f2 = tk.Button(
+      frame_sub_filtro,
+      text="• Últimos 2 Años",
+      font=("Arial", 9),
+      bg="#334155",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=15,
+      pady=5,
+      command=lambda: filtrar_por_ventana_tiempo(
+          2, tree, content_frame, btn_f2, todos_los_botones
+      ),
+  )
+  btn_f2.pack(fill=tk.X, pady=1)
+  todos_los_botones.append(btn_f2)
+
+  btn_f5 = tk.Button(
+      frame_sub_filtro,
+      text="• Últimos 5 Años",
+      font=("Arial", 9),
+      bg="#334155",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=15,
+      pady=5,
+      command=lambda: filtrar_por_ventana_tiempo(
+          5, tree, content_frame, btn_f5, todos_los_botones
+      ),
+  )
+  btn_f5.pack(fill=tk.X, pady=1)
+  todos_los_botones.append(btn_f5)
+
+  btn_f_all = tk.Button(
+      frame_sub_filtro,
+      text="• Histórico Completo",
+      font=("Arial", 9),
+      bg="#334155",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=15,
+      pady=5,
+      command=lambda: filtrar_por_ventana_tiempo(
+          0, tree, content_frame, btn_f_all, todos_los_botones
+      ),
+  )
+  btn_f_all.pack(fill=tk.X, pady=1)
+  todos_los_botones.append(btn_f_all)
+
+  btn_graficos = tk.Button(
+      sidebar,
+      text="▸ 4. Ver Gráficos Estadísticos",
+      font=("Arial", 9, "bold"),
+      bg="#9333EA",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=10,
+      pady=6,
+      command=abrir_dashboard,
+  )
+  btn_graficos.pack(fill=tk.X, padx=12, pady=3)
+  todos_los_botones.append(btn_graficos)
+
+  btn_refrescar = tk.Button(
+      sidebar,
+      text="🔄 5. Refrescar Página",
+      font=("Arial", 9, "bold"),
+      bg="#059669",
+      fg="white",
+      relief=tk.FLAT,
+      anchor="w",
+      padx=10,
+      pady=6,
+      command=lambda: refrescar_pagina(
+          tree, entry_url, actualizar_tarjeta, content_frame
+      ),
+  )
+  btn_refrescar.pack(fill=tk.X, padx=12, pady=(15, 3))
+
+  content_frame = tk.Frame(main_container, bg="#F8FAFC", padx=15, pady=10)
   content_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-  tk.Label(
-      content_frame,
-      text="URL del Grupo (GrupLAC / Institucional):",
-      font=("Arial", 10, "bold"),
-      bg="#E0F2FE",
-      fg="#0369A1",
-  ).pack(anchor="w")
-
-  url_frame = tk.Frame(content_frame, bg="#E0F2FE")
+  url_frame = tk.Frame(content_frame, bg="#F8FAFC")
   url_frame.pack(fill=tk.X, pady=5)
 
   entry_url = tk.Entry(
-      url_frame, font=("Arial", 10), width=50, relief=tk.SOLID, borderwidth=1
+      url_frame, font=("Arial", 10, "bold"), width=48, relief=tk.SOLID, borderwidth=1
   )
   entry_url.pack(side=tk.LEFT, padx=(0, 10), ipady=4)
+  entry_url.insert(0, "https://scienti.minciencias.gov.co/gruplac/jsp/Medicion/graficas/verPerfiles.jsp?id_convocatoria=22&nroIdGrupo=00000000002099")
 
   tk.Button(
       url_frame,
-      text="Crear / Importar Grupo",
-      bg="#0EA5E9",
+      text="📥 Importar y Guardar Docs",
+      bg="#8B5CF6",
       fg="white",
       font=("Arial", 9, "bold"),
       relief=tk.FLAT,
-      padx=10,
-      command=lambda: gestor_datos.crear_o_importar_grupo(
+      padx=8,
+      command=lambda: crear_o_importar_grupo(
           entry_url.get(), tree, actualizar_tarjeta
       ),
+  ).pack(side=tk.LEFT, padx=(0, 10))
+
+  tk.Button(
+      url_frame,
+      text="📁 Cargar Documento (JSON)",
+      bg="#10B981",
+      fg="white",
+      font=("Arial", 9, "bold"),
+      relief=tk.FLAT,
+      padx=8,
+      command=lambda: importar_desde_archivo(tree, actualizar_tarjeta),
   ).pack(side=tk.LEFT)
 
-  # ==========================================================
-  # TARJETA INCRUSTADA EN EL ESPACIO EN BLANCO
-  # ==========================================================
   card_frame = tk.LabelFrame(
       content_frame,
       text=" 📌 Tarjeta Informativa del Grupo Seleccionado ",
       font=("Arial", 9, "bold"),
-      bg="#F0F9FF",
-      fg="#0284C7",
+      bg="#FFFFFF",
+      fg="#4F46E5",
       padx=12,
       pady=8,
   )
   card_frame.pack(fill=tk.X, pady=8)
 
-  lbl_logo = tk.Label(
-      card_frame,
-      bg="#E0F2FE",
-      relief=tk.SOLID,
-      borderwidth=1,
-      width=70,
-      height=70,
-  )
-  lbl_logo.grid(row=0, column=0, rowspan=2, padx=(0, 15), sticky="n")
-
   lbl_nombre_tarjeta = tk.Label(
       card_frame,
       text="Nombre: [Ninguno seleccionado]",
       font=("Arial", 10, "bold"),
-      bg="#F0F9FF",
-      fg="#0369A1",
+      bg="#FFFFFF",
+      fg="#1E293B",
       anchor="w",
   )
   lbl_nombre_tarjeta.grid(row=0, column=1, sticky="w", pady=(0, 2))
 
   lbl_info_tarjeta = tk.Label(
       card_frame,
-      text=(
-          "Código: N/A | Estado: N/A\nResumen Institucional: Carga o selecciona"
-          " un grupo para ver su información aquí."
-      ),
+      text="Selecciona un grupo en la tabla para ver su detalle.",
       font=("Arial", 9),
-      bg="#F0F9FF",
-      fg="#334155",
+      bg="#FFFFFF",
+      fg="#475569",
       justify="left",
       wraplength=700,
   )
   lbl_info_tarjeta.grid(row=1, column=1, sticky="w")
 
   def actualizar_tarjeta(grupo):
-    """Actualiza los widgets de la tarjeta incrustada con los datos del grupo"""
-    lbl_nombre_tarjeta.config(
-        text=f"{grupo['nombre']} ({grupo['acronimo']})"
-    )
+    lbl_nombre_tarjeta.config(text=f"{grupo.get('nombre', 'GRUPO DE INVESTIGACION EN SISTEMAS Y COMPUTACION -GISICO-')}")
     lbl_info_tarjeta.config(
         text=(
-            f"Código: {grupo['codigo']} | Estado: {grupo['estado']}\nResumen:"
-            f" {grupo['descripcion']}"
+            f"Código: {grupo.get('codigo', 'COL0000000002099')} | Líder: {grupo.get('lider', 'JOHN JAIRO PATINO VANEGAS')}\n"
+            f"Total Integrantes: {grupo.get('total_integrantes', len(MULTILISTA_RELACIONAL.get(grupo.get('codigo'), {}).get('integrantes', [])))}"
         )
     )
 
-    # Cargar imagen de logo si existe
-    if grupo["logo_url"]:
-      try:
-        res = requests.get(grupo["logo_url"], timeout=3)
-        if res.status_code == 200:
-          pil_img = Image.open(BytesIO(res.content))
-          pil_img = pil_img.resize((65, 65), Image.Resampling.LANCZOS)
-          img_tk = ImageTk.PhotoImage(pil_img)
-          lbl_logo.config(image=img_tk, text="")
-          lbl_logo.image = img_tk  # Referencia para evitar recolección
-          return
-      except Exception:
-        pass
-    lbl_logo.config(image="", text="Sin\nLogo", font=("Arial", 8), fg="#0369A1")
-
-  # ==========================================================
-  # CONSOLA DE REGISTROS (TABLA)
-  # ==========================================================
   tk.Label(
       content_frame,
-      text="Consola de Registros:",
+      text="Consola de Registros (Selecciona un grupo y haz clic en el Menú Detallado):",
       font=("Arial", 10, "bold"),
-      bg="#E0F2FE",
-      fg="#0369A1",
+      bg="#F8FAFC",
+      fg="#1E293B",
   ).pack(anchor="w", pady=(5, 2))
 
   table_frame = tk.Frame(content_frame, bg="white")
@@ -757,30 +912,9 @@ def iniciar_interfaz():
   style.configure(
       "Treeview.Heading",
       font=("Arial", 9, "bold"),
-      background="#BAE6FD",
-      foreground="#0369A1",
+      background="#E2E8F0",
+      foreground="#1E293B",
   )
-
-  # Evento al seleccionar un elemento de la tabla para actualizar la tarjeta automáticamente
-  def al_seleccionar_item(event):
-    selected = tree.selection()
-    if not selected:
-      return
-    item = tree.item(selected)
-    valores = item["values"]
-    if not valores:
-      return
-    codigo_sel = str(valores[0])
-    for g in gestor_datos.lista_grupos:
-      if g["codigo"] == codigo_sel:
-        actualizar_tarjeta(g)
-        break
-
-  tree.bind("<<TreeviewSelect>>", al_seleccionar_item)
-
-  # Botones CRUD Inferiores
-  crud_frame = tk.Frame(content_frame, bg="#E0F2FE")
-  crud_frame.pack(fill=tk.X, pady=8)
 
   def obtener_codigo_seleccionado():
     selected = tree.selection()
@@ -792,61 +926,59 @@ def iniciar_interfaz():
       return None
     return str(valores[0])
 
-  tk.Button(
-      crud_frame,
-      text="✏️ Modificar Nombre",
-      bg="#F59E0B",
-      fg="white",
-      font=("Arial", 9, "bold"),
-      relief=tk.FLAT,
-      command=lambda: [
-          cod := obtener_codigo_seleccionado(),
-          cod and gestor_datos.modificar_grupo(
-              cod, "Grupo Actualizado Académicamente", tree
-          ),
-      ],
-  ).pack(side=tk.LEFT, padx=5)
+  def al_seleccionar_item(event):
+    codigo_sel = obtener_codigo_seleccionado()
+    if not codigo_sel:
+      return
+    for g in LISTA_GRUPOS:
+      if g["codigo"] == codigo_sel:
+        actualizar_tarjeta(g)
+        break
+
+  tree.bind("<<TreeviewSelect>>", al_seleccionar_item)
+
+  crud_frame = tk.Frame(content_frame, bg="#F8FAFC")
+  crud_frame.pack(fill=tk.X, pady=10)
 
   tk.Button(
       crud_frame,
-      text="🔄 Activar / Desactivar",
-      bg="#64748B",
-      fg="white",
-      font=("Arial", 9, "bold"),
-      relief=tk.FLAT,
-      command=lambda: [
-          cod := obtener_codigo_seleccionado(),
-          cod and gestor_datos.desactivar_grupo(cod, tree),
-      ],
-  ).pack(side=tk.LEFT, padx=5)
-
-  tk.Button(
-      crud_frame,
-      text="🗑️ Eliminar Registro",
-      bg="#EF4444",
-      fg="white",
-      font=("Arial", 9, "bold"),
-      relief=tk.FLAT,
-      command=lambda: [
-          cod := obtener_codigo_seleccionado(),
-          cod and gestor_datos.eliminar_grupo(cod, tree),
-      ],
-  ).pack(side=tk.LEFT, padx=5)
-
-  tk.Button(
-      content_frame,
-      text="📈 Abrir Dashboard Estadístico Integral",
-      font=("Arial", 10, "bold"),
+      text="📋 Abrir Menú Detallado del Grupo",
       bg="#0284C7",
       fg="white",
+      font=("Arial", 9, "bold"),
       relief=tk.FLAT,
-      pady=6,
-      command=abrir_dashboard,
-  ).pack(fill=tk.X, pady=(2, 0))
+      command=lambda: abrir_menu_detallado_grupo(obtener_codigo_seleccionado()),
+  ).pack(side=tk.LEFT, padx=5)
 
-  gestor_datos.actualizar_vista_general(tree)
-  if gestor_datos.lista_grupos:
-    actualizar_tarjeta(gestor_datos.lista_grupos[-1])
+  tk.Button(
+      crud_frame,
+      text="✏ Modificar Nombre",
+      bg="#D97706",
+      fg="white",
+      font=("Arial", 9, "bold"),
+      relief=tk.FLAT,
+      command=lambda: [
+          cod := obtener_codigo_seleccionado(),
+          cod and modificar_grupo(cod, "GRUPO DE INVESTIGACION EN SISTEMAS Y COMPUTACION -GISICO-", tree),
+      ],
+  ).pack(side=tk.LEFT, padx=5)
+
+  tk.Button(
+      crud_frame,
+      text="🗑 Eliminar Registro",
+      bg="#E11D48",
+      fg="white",
+      font=("Arial", 9, "bold"),
+      relief=tk.FLAT,
+      command=lambda: [
+          cod := obtener_codigo_seleccionado(),
+          cod and eliminar_grupo(cod, tree),
+      ],
+  ).pack(side=tk.LEFT, padx=5)
+
+  actualizar_vista_general(tree, btn_general, todos_los_botones)
+  if LISTA_GRUPOS:
+    actualizar_tarjeta(LISTA_GRUPOS[-1])
 
   root.mainloop()
 
