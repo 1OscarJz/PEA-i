@@ -17,6 +17,7 @@ Modelo de datos (variables de entrada/salida)
   Integrante   : id_investigador, vinculacion, horas, periodo, activo
   Producto     : id, titulo, tipo, categoria, anio, validado, grupo, investigadores, activo
 """
+import argparse
 import csv
 import io
 import json
@@ -24,12 +25,17 @@ import os
 import random
 import re
 import time
-import tkinter as tk
+import sys
 import unicodedata
 import urllib.parse
 import zlib
 from datetime import datetime
-from tkinter import filedialog, messagebox, simpledialog, ttk
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
+except ImportError:                      # modo consola (--cli): no hace falta la interfaz
+    tk = filedialog = messagebox = simpledialog = ttk = None
 
 
 
@@ -505,6 +511,25 @@ def grupo_eliminar(sis, codigo, registrar=True):
     return g, None
 
 
+def grupo_eliminar_cascada(sis, codigo, registrar=True):
+    """Elimina el grupo Y todos sus productos. Una sola entrada en el historial: un
+    único 'deshacer' restaura el grupo con sus integrantes y todos sus productos."""
+    g = lista_buscar(sis["grupos"], "codigo", codigo)
+    if g is None:
+        return None, "El grupo no existe"
+    productos = [producto_a_dict(p) for p in lista_recorrer(g["productos"])]
+    snapshot = grupo_a_dict(g)
+    for p in productos:
+        producto_eliminar(sis, p["id"], registrar=False)
+    _, error = grupo_eliminar(sis, codigo, registrar=False)
+    if error:
+        return None, error
+    if registrar:
+        _registrar(sis, {"op": "eliminar", "ent": "grupo", "clave": codigo,
+                         "snapshot": snapshot, "productos": productos})
+    return g, None
+
+
 # ==========================================================
 # 8. CRUD DE INVESTIGADORES
 # ==========================================================
@@ -747,9 +772,16 @@ def _desactivar_ent(sis, ent, clave, activo):
     return producto_desactivar(sis, clave, activo, registrar=False)
 
 
-def _restaurar_ent(sis, ent, snap):
+def _restaurar_ent(sis, ent, snap, productos=None):
     if ent == "grupo":
         lista_insertar_final(sis["grupos"], grupo_desde_dict(snap))
+        for p in (productos or []):
+            error = _validar_producto(sis, p["grupo"], p["investigadores"], p["anio"])
+            if error:
+                return error
+            prod = producto_desde_dict(p)
+            lista_insertar_final(sis["productos"], prod)
+            _producto_enlazar(sis, prod)
         return None
     if ent == "investigador":
         lista_insertar_final(sis["investigadores"], investigador_desde_dict(snap))
@@ -777,7 +809,7 @@ def deshacer(sis):
     elif tipo == "desactivar":
         _, error = _desactivar_ent(sis, ent, clave, op["antes"])
     elif tipo == "eliminar":
-        error = _restaurar_ent(sis, ent, op["snapshot"])
+        error = _restaurar_ent(sis, ent, op["snapshot"], op.get("productos"))
     if error:
         return "No se pudo deshacer: " + error
     return "Deshecho: %s %s %s" % (tipo, ent, clave)
@@ -872,6 +904,127 @@ def cargar_json(ruta):
         return None, [], "No se pudo cargar: %s" % e
     sis, advertencias = sistema_desde_dict(datos)
     return sis, advertencias, None
+
+
+# ==========================================================
+# 14b. INTERCAMBIO CON C++  (archivo de texto, campos separados por |)
+# ==========================================================
+# Python hace el scraping/importación y escribe este archivo; el programa en C++ lo lee
+# (y también puede escribirlo para que Python lo abra). Formato PEA-i-TXT v1, UTF-8:
+#   #PEA-i-TXT v1
+#   C|contador_prod|contador_inv
+#   G|codigo|nombre|lider|categoria|url|activo
+#   I|id|nombre|cod_rh|email|formacion|categoria|activo
+#   M|cod_grupo|id_investigador|vinculacion|horas|periodo|activo     (integrante)
+#   P|id|titulo|tipo|categoria|anio|validado|cod_grupo|ids_autores|activo   (autores con ;)
+#   Q|tipo|origen|estado|modo|codigo                                  (cola de importaciones)
+#   FIN|n_grupos|n_investigadores|n_integrantes|n_productos
+# Booleanos: 1/0. Los '|' y saltos de línea dentro de un texto se reemplazan por '/' y ' '.
+FORMATO_TXT = "#PEA-i-TXT v1"
+
+
+def _t(valor):
+    return str(valor).replace("|", "/").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _b(valor):
+    return "1" if valor else "0"
+
+
+def exportar_txt(sis, ruta):
+    """Devuelve None si todo salió bien o el mensaje de error."""
+    lineas = [FORMATO_TXT,
+              "# Campos separados por |  (ver especificación en Taller2_PEAi.py, sección 14b)",
+              "C|%d|%d" % (sis["contador_prod"], sis["contador_inv"])]
+    n_g = n_i = n_m = n_p = 0
+    for g in lista_recorrer(sis["grupos"]):
+        lineas.append("G|%s|%s|%s|%s|%s|%s" % (_t(g["codigo"]), _t(g["nombre"]),
+                      _t(g["lider"]), _t(g["categoria"]), _t(g["url"]), _b(g["activo"])))
+        n_g += 1
+    for i in lista_recorrer(sis["investigadores"]):
+        lineas.append("I|%s|%s|%s|%s|%s|%s|%s" % (_t(i["id"]), _t(i["nombre"]),
+                      _t(i["cod_rh"]), _t(i["email"]), _t(i["formacion"]),
+                      _t(i["categoria"]), _b(i["activo"])))
+        n_i += 1
+    for g in lista_recorrer(sis["grupos"]):
+        for m in lista_recorrer(g["integrantes"]):
+            lineas.append("M|%s|%s|%s|%s|%s|%s" % (_t(g["codigo"]), _t(m["id_investigador"]),
+                          _t(m["vinculacion"]), _t(m["horas"]), _t(m["periodo"]),
+                          _b(m["activo"])))
+            n_m += 1
+    for p in lista_recorrer(sis["productos"]):
+        lineas.append("P|%s|%s|%s|%s|%d|%s|%s|%s|%s" % (
+            _t(p["id"]), _t(p["titulo"]), _t(p["tipo"]), _t(p["categoria"]), p["anio"],
+            _b(p["validado"]), _t(p["grupo"]), ";".join(p["investigadores"]),
+            _b(p["activo"])))
+        n_p += 1
+    for q in cola_recorrer(sis["importaciones"]):
+        lineas.append("Q|%s|%s|%s|%s|%s" % (_t(q.get("tipo", "")), _t(q.get("origen", "")),
+                      _t(q.get("estado", "")), _t(q.get("modo", "")),
+                      _t(q.get("codigo", ""))))
+    lineas.append("FIN|%d|%d|%d|%d" % (n_g, n_i, n_m, n_p))
+    try:
+        with open(ruta, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lineas) + "\n")
+    except OSError as e:
+        return "No se pudo exportar: %s" % e
+    return None
+
+
+def importar_txt(ruta):
+    """Lee un archivo PEA-i-TXT. Devuelve (sistema, advertencias, error)."""
+    try:
+        with open(ruta, "r", encoding="utf-8-sig") as f:
+            lineas = f.read().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        return None, [], "No se pudo abrir el archivo: %s" % e
+    if not lineas or not lineas[0].startswith("#PEA-i-TXT"):
+        return None, [], "El archivo no tiene el formato PEA-i-TXT"
+    datos = {"grupos": [], "investigadores": [], "productos": [], "importaciones": [],
+             "contador_prod": 0, "contador_inv": 0}
+    grupos = {}
+    advertencias = []
+    for n, linea in enumerate(lineas, 1):
+        if not linea.strip() or linea.startswith("#"):
+            continue
+        c = linea.split("|")
+        try:
+            if c[0] == "C":
+                datos["contador_prod"] = int(c[1])
+                datos["contador_inv"] = int(c[2])
+            elif c[0] == "G":
+                g = {"codigo": c[1], "nombre": c[2], "lider": c[3], "categoria": c[4],
+                     "url": c[5], "activo": c[6] == "1", "integrantes": []}
+                datos["grupos"].append(g)
+                grupos[c[1]] = g
+            elif c[0] == "I":
+                datos["investigadores"].append({"id": c[1], "nombre": c[2], "cod_rh": c[3],
+                                                "email": c[4], "formacion": c[5],
+                                                "categoria": c[6], "activo": c[7] == "1"})
+            elif c[0] == "M":
+                if c[1] in grupos:
+                    grupos[c[1]]["integrantes"].append(
+                        {"id_investigador": c[2], "vinculacion": c[3], "horas": c[4],
+                         "periodo": c[5], "activo": c[6] == "1"})
+                else:
+                    advertencias.append("Línea %d: integrante de un grupo inexistente" % n)
+            elif c[0] == "P":
+                datos["productos"].append({
+                    "id": c[1], "titulo": c[2], "tipo": c[3], "categoria": c[4],
+                    "anio": int(c[5]), "validado": c[6] == "1", "grupo": c[7],
+                    "investigadores": [x for x in c[8].split(";") if x],
+                    "activo": c[9] == "1"})
+            elif c[0] == "Q":
+                item = {"tipo": c[1], "origen": c[2], "estado": c[3] or "pendiente"}
+                if c[4]:
+                    item["modo"] = c[4]
+                if c[5]:
+                    item["codigo"] = c[5]
+                datos["importaciones"].append(item)
+        except (IndexError, ValueError):
+            advertencias.append("Línea %d inválida: %s" % (n, linea[:60]))
+    sis, avisos = sistema_desde_dict(datos)
+    return sis, advertencias + avisos, None
 
 
 # ==========================================================
@@ -2015,6 +2168,7 @@ except ImportError:
 COLOR_PRIMARIO = "#14532D"
 COLOR_ACENTO = "#16A34A"
 COLOR_FONDO = "#F3F4F6"
+COLOR_MENU = "#0F3D22"
 COLORES_GRAFICA = ["#16A34A", "#2563EB", "#D97706", "#9333EA", "#DC2626", "#0891B2"]
 ARCHIVO_LOGO = "logo_upc.png"          # opcional: PNG de ~60 px de alto junto al programa
 
@@ -2309,12 +2463,24 @@ def accion_grupo_eliminar():
     codigo = exigir_seleccion(APP["tabla_grupos"])
     if codigo is None:
         return
-    if not messagebox.askyesno("Eliminar grupo",
-                               "¿Eliminar definitivamente el grupo %s?" % codigo,
-                               parent=APP["raiz"]):
+    n = grupo_consultar(APP["sis"], codigo)["productos"]["tam"]
+    if n == 0:
+        if not messagebox.askyesno("Eliminar grupo",
+                                   "¿Eliminar definitivamente el grupo %s?" % codigo,
+                                   parent=APP["raiz"]):
+            return
+        _, error = grupo_eliminar(APP["sis"], codigo)
+        resolver(error, "Grupo %s eliminado (puede deshacerlo)" % codigo)
         return
-    _, error = grupo_eliminar(APP["sis"], codigo)
-    resolver(error, "Grupo %s eliminado (puede deshacerlo)" % codigo)
+    texto = ("El grupo %s tiene %d productos asociados.\n\n"
+             "• SÍ: elimina el grupo junto con sus %d productos y sus integrantes. "
+             "Se puede deshacer de una sola vez (Ctrl+Z).\n"
+             "• NO: cancela. Si solo quiere ocultarlo sin perder datos, use "
+             "«Activar / Desactivar».\n\n¿Eliminar el grupo y sus productos?" % (codigo, n, n))
+    if not messagebox.askyesno("Eliminar grupo con productos", texto, parent=APP["raiz"]):
+        return
+    _, error = grupo_eliminar_cascada(APP["sis"], codigo)
+    resolver(error, "Grupo %s y sus %d productos eliminados (puede deshacerlo)" % (codigo, n))
 
 
 def refrescar_grupos():
@@ -3146,6 +3312,44 @@ def preguntar_inicio():
         abrir_archivo()
 
 
+def accion_exportar_txt():
+    ruta = filedialog.asksaveasfilename(title="Exportar datos para el programa en C++",
+                                        defaultextension=".txt",
+                                        initialfile="pea_i_datos_cpp.txt",
+                                        filetypes=[("Texto PEA-i", "*.txt")])
+    if not ruta:
+        return
+    error = exportar_txt(APP["sis"], ruta)
+    if error:
+        messagebox.showerror("Exportar", error, parent=APP["raiz"])
+        return
+    sis = APP["sis"]
+    messagebox.showinfo("Exportación lista",
+                        "Archivo para C++ creado:\n%s\n\nGrupos: %d  |  Investigadores: %d  "
+                        "|  Productos: %d" % (ruta, sis["grupos"]["tam"],
+                                              sis["investigadores"]["tam"],
+                                              sis["productos"]["tam"]), parent=APP["raiz"])
+
+
+def accion_abrir_txt():
+    if not confirmar_perdida():
+        return
+    ruta = filedialog.askopenfilename(title="Abrir archivo de texto PEA-i (de C++)",
+                                      filetypes=[("Texto PEA-i", "*.txt")])
+    if not ruta:
+        return
+    sis, avisos, error = importar_txt(ruta)
+    if error:
+        messagebox.showerror("Abrir", error, parent=APP["raiz"])
+        return
+    APP["sis"] = sis
+    resolver(None, "Datos cargados desde %s" % os.path.basename(ruta))
+    APP["sucio"] = False
+    actualizar_estado()
+    if avisos:
+        messagebox.showwarning("Líneas omitidas", "\n".join(avisos[:15]), parent=APP["raiz"])
+
+
 # ==========================================================
 # 9. REFRESCO GENERAL Y BARRA DE ESTADO
 # ==========================================================
@@ -3209,35 +3413,48 @@ def construir_estilo():
 
 
 def construir_menu():
-    raiz = APP["raiz"]
-    menu = tk.Menu(raiz)
-    archivo = tk.Menu(menu, tearoff=0)
-    archivo.add_command(label="Nuevo (sin datos)", command=nuevo_vacio)
-    archivo.add_command(label="Abrir datos...", command=abrir_archivo)
-    archivo.add_command(label="Guardar", command=guardar, accelerator="Ctrl+S")
-    archivo.add_command(label="Guardar como...", command=guardar_como)
-    archivo.add_separator()
-    archivo.add_command(label="Cargar datos de ejemplo", command=cargar_ejemplo)
-    archivo.add_separator()
-    archivo.add_command(label="Salir", command=cerrar_app)
-    menu.add_cascade(label="Archivo", menu=archivo)
-    importar = tk.Menu(menu, tearoff=0)
-    importar.add_command(label="Desde URL de SCIENTI...", command=accion_importar_url)
-    importar.add_command(label="Desde archivo (HTML / PDF / CSV)...",
-                         command=accion_importar_archivo)
-    importar.add_separator()
-    importar.add_command(label="Diagnóstico de una URL...", command=accion_diagnostico_url)
-    importar.add_command(label="Diagnóstico de un archivo...",
-                         command=accion_diagnostico_archivo)
-    importar.add_separator()
-    importar.add_command(label="Crear plantilla CSV...", command=accion_plantilla_csv)
-    menu.add_cascade(label="Importar", menu=importar)
-    edicion = tk.Menu(menu, tearoff=0)
-    edicion.add_command(label="Deshacer", command=accion_deshacer, accelerator="Ctrl+Z")
-    menu.add_cascade(label="Edición", menu=edicion)
-    raiz.config(menu=menu)
-    raiz.bind("<Control-s>", lambda e: guardar())
-    raiz.bind("<Control-z>", lambda e: accion_deshacer())
+    """Atajos de teclado (los menús visibles están en construir_barra_menus)."""
+    APP["raiz"].bind("<Control-s>", lambda e: guardar())
+    APP["raiz"].bind("<Control-z>", lambda e: accion_deshacer())
+
+
+def definicion_menus():
+    """Cada menú: (título, [(texto, comando) | None]).  None = separador."""
+    return [
+        ("Archivo", [("Nuevo (sin datos)", nuevo_vacio),
+                     ("Abrir datos (.json)...", abrir_archivo),
+                     ("Guardar      Ctrl+S", guardar),
+                     ("Guardar como...", guardar_como), None,
+                     ("Cargar datos de ejemplo", cargar_ejemplo), None,
+                     ("Exportar para C++ (.txt)...", accion_exportar_txt),
+                     ("Abrir archivo .txt (de C++)...", accion_abrir_txt), None,
+                     ("Salir", cerrar_app)]),
+        ("Importar", [("Desde URL de SCIENTI...", accion_importar_url),
+                      ("Desde archivo (HTML / PDF / CSV)...", accion_importar_archivo), None,
+                      ("Diagnóstico de una URL...", accion_diagnostico_url),
+                      ("Diagnóstico de un archivo...", accion_diagnostico_archivo), None,
+                      ("Crear plantilla CSV...", accion_plantilla_csv)]),
+        ("Edición", [("Deshacer      Ctrl+Z", accion_deshacer)]),
+    ]
+
+
+def construir_barra_menus():
+    """Barra de menús integrada al diseño (mismo verde que el encabezado)."""
+    barra = tk.Frame(APP["raiz"], bg=COLOR_MENU)
+    barra.pack(fill="x")
+    for titulo, opciones in definicion_menus():
+        boton = tk.Menubutton(barra, text=titulo + "  ▾", bg=COLOR_MENU, fg="white",
+                              activebackground=COLOR_ACENTO, activeforeground="white",
+                              relief="flat", bd=0, padx=16, pady=7, cursor="hand2",
+                              font=("Segoe UI", 10, "bold"))
+        menu = tk.Menu(boton, tearoff=0, font=("Segoe UI", 10))
+        for opcion in opciones:
+            if opcion is None:
+                menu.add_separator()
+            else:
+                menu.add_command(label=opcion[0], command=opcion[1])
+        boton.configure(menu=menu)
+        boton.pack(side="left")
 
 
 def construir_encabezado():
@@ -3272,6 +3489,7 @@ def construir_barra_herramientas():
                     variable=APP["ver_inactivos"], command=refrescar_todo).pack(
         side="left", padx=16)
     ttk.Button(barra, text="↶ Deshacer", command=accion_deshacer).pack(side="right")
+    ttk.Button(barra, text="💾 Guardar", command=guardar).pack(side="right", padx=6)
 
 
 def construir_estado():
@@ -3420,6 +3638,9 @@ def construir_pestanas():
 # 11. PROGRAMA PRINCIPAL
 # ==========================================================
 def iniciar():
+    if tk is None:
+        print("Esta computadora no tiene tkinter instalado: no se puede abrir la interfaz.")
+        return
     raiz = tk.Tk()
     APP["raiz"] = raiz
     APP["sis"] = sistema_crear()
@@ -3431,6 +3652,7 @@ def iniciar():
     construir_estilo()
     construir_menu()
     construir_encabezado()
+    construir_barra_menus()
     construir_barra_herramientas()
     construir_estado()
     construir_pestanas()
@@ -3440,5 +3662,112 @@ def iniciar():
     raiz.mainloop()
 
 
+# ==========================================================
+# MODO CONSOLA (lo usa el programa en C++ para delegar el scraping en Python)
+#   python Taller2_PEAi.py --cli --datos datos.txt --importar url "https://..." [--modo auto]
+#   python Taller2_PEAi.py --cli --datos datos.txt --importar html listado.html
+#   python Taller2_PEAi.py --cli --datos datos.txt --importar html cv.html --modo investigador --grupo COL0218897
+#   python Taller2_PEAi.py --cli --datos datos.txt --procesar-cola
+# Lee --datos (.txt PEA-i o .json), importa, y vuelve a escribir el resultado en --salida
+# (por defecto el mismo archivo). Código de salida 0 = correcto, 1 = error.
+# ==========================================================
+def cli_cargar(ruta):
+    if not os.path.exists(ruta):
+        return sistema_crear(), None
+    if ruta.lower().endswith(".json"):
+        sis, avisos, error = cargar_json(ruta)
+    else:
+        sis, avisos, error = importar_txt(ruta)
+    for a in avisos[:5]:
+        print("  ! " + a)
+    return sis, error
+
+
+def cli_guardar(sis, ruta):
+    if ruta.lower().endswith(".json"):
+        return guardar_json(sis, ruta)
+    return exportar_txt(sis, ruta)
+
+
+def cli_procesar_cola(sis):
+    cola = sis["importaciones"]
+    total = cola["tam"]
+    if total == 0:
+        print("La cola de importaciones está vacía.")
+        return
+    correctas = 0
+    fallidas = []
+    for numero in range(total):
+        item = cola_desencolar(cola)
+        etiqueta = item.get("codigo") or item["origen"]
+        print("[%d/%d] %s" % (numero + 1, total, etiqueta))
+        datos, error = leer_origen(item["tipo"], item["origen"], "auto", item)
+        if error is None:
+            informe, error = importar_datos(sis, datos, None, None, False)
+        if error:
+            print("   ERROR: " + error.splitlines()[0])
+            item["estado"] = ("error: " + error.splitlines()[0])[:60]
+            fallidas.append(item)
+        else:
+            correctas += 1
+            print("   OK: %d productos nuevos, %d integrantes nuevos"
+                  % (informe["productos_nuevos"], informe["integrantes_nuevos"]))
+        if numero < total - 1:
+            time.sleep(2)                 # pausa entre descargas
+    for item in fallidas:
+        cola_encolar(cola, item)
+    print("\nCola procesada: %d correctas, %d con error (siguen en la cola)"
+          % (correctas, len(fallidas)))
+
+
+def main_cli(argv):
+    ap = argparse.ArgumentParser(description="PEA-i sin interfaz gráfica")
+    ap.add_argument("--datos", required=True, help="archivo de datos (.txt PEA-i o .json)")
+    ap.add_argument("--salida", help="archivo de salida (por defecto, el mismo de --datos)")
+    ap.add_argument("--importar", nargs=2, metavar=("TIPO", "ORIGEN"),
+                    help="TIPO: url | html | pdf | csv")
+    ap.add_argument("--modo", default="auto", choices=["auto", "grupo", "investigador"])
+    ap.add_argument("--grupo", default="", help="código del grupo (para un CvLAC)")
+    ap.add_argument("--procesar-cola", action="store_true")
+    args = ap.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    sis, error = cli_cargar(args.datos)
+    if error:
+        print("ERROR: " + error)
+        return 1
+    salida = args.salida or args.datos
+    try:
+        if args.importar:
+            tipo, origen = args.importar
+            datos, error = leer_origen(tipo, origen, args.modo)
+            if error == MODO_NO_DETECTADO:
+                print("ERROR: no se pudo determinar si la fuente es un grupo o un investigador. "
+                      "Indique el contenido.")
+                return 1
+            if error:
+                print("ERROR: " + error)
+                return 1
+            if datos["modo"] == "investigador" and not args.grupo:
+                print("ERROR: para importar un CvLAC indique el grupo al que se asocian "
+                      "los productos.")
+                return 1
+            print(describir_datos(datos) + "\n")
+            informe, error = importar_datos(sis, datos, None, args.grupo or None)
+            if error:
+                print("ERROR: " + error)
+                return 1
+            print(informe_texto(informe))
+        if args.procesar_cola:
+            cli_procesar_cola(sis)
+    finally:
+        error = cli_guardar(sis, salida)
+        if error:
+            print("ERROR al guardar: " + error)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--cli" in sys.argv:
+        sys.exit(main_cli([a for a in sys.argv[1:] if a != "--cli"]))
     iniciar()
